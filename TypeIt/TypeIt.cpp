@@ -3,7 +3,6 @@
 #include <iostream>
 #include <string>
 #include <thread>
-
 #include "resource.h"
 
 #define WM_TRAYICON (WM_USER + 1)
@@ -100,8 +99,22 @@ std::wstring GetClipboardText() {
     return text;
 }
 
+bool IsNoKeyCurrentlyPressed() {
+    // Check relevant keys: Ctrl, Shift, Alt
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) return false;
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) return false;
+    if (GetAsyncKeyState(VK_MENU) & 0x8000) return false;
+
+    return true;
+}
+
 // Simulate Keyboard Input
 void SimulateKeyboardInput(const std::wstring& text) {
+    // Wait until no relevant key is pressed
+    while (!IsNoKeyCurrentlyPressed()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     for (wchar_t c : text) {
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
@@ -122,22 +135,21 @@ void SimulateKeyboardInput(const std::wstring& text) {
             SendInput(1, &input, sizeof(INPUT));
         }
 
-		// Workaround for preventing typing too fast
+        // Workaround for preventing typing too fast
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-	// Press Enter if option is enabled
-	if (pressEnter)
-	{
+    // Press Enter if option is enabled
+    if (pressEnter) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-		INPUT input = { 0 };
-		input.type = INPUT_KEYBOARD;
-		input.ki.wVk = VK_RETURN;
-		input.ki.dwFlags = 0;
-		SendInput(1, &input, sizeof(INPUT));
-		input.ki.dwFlags = KEYEVENTF_KEYUP;
-		SendInput(1, &input, sizeof(INPUT));
-	}
+        INPUT input = { 0 };
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = VK_RETURN;
+        input.ki.dwFlags = 0;
+        SendInput(1, &input, sizeof(INPUT));
+        input.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &input, sizeof(INPUT));
+    }
 }
 
 // Tray Icon
