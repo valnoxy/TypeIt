@@ -7,13 +7,21 @@
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_EXIT 1001
-#define ID_TRAY_OPTION1 1002
-#define ID_TRAY_OPTION2 1003
+#define ID_TRAY_OPTION1 1002 // CTRL-V + ENTER
+#define ID_TRAY_OPTION2 1003 // CTRL-V
+#define ID_TRAY_OPTION3 1004 // Disable new line at the end
 
 HINSTANCE hInst;
 NOTIFYICONDATA nid;
 HWND hWnd;
 bool pressEnter = true;
+bool disableNewLine = false;
+
+enum Options
+{
+	PressEnter,
+	DisableNewLine
+};
 
 // Read stored registry value
 bool ReadRegistry(const wchar_t* keyPath, const wchar_t* valueName) {
@@ -32,9 +40,19 @@ bool ReadRegistry(const wchar_t* keyPath, const wchar_t* valueName) {
 }
 
 // Write stored registry value
-bool WriteRegistry(bool value) {
+bool WriteRegistry(Options option, bool value) {
     const wchar_t* keyPath = L"SOFTWARE\\valnoxy\\TypeIt";
-    const wchar_t* valueName = L"PressEnter";
+    LPCWSTR valueName = nullptr;
+
+    switch (option)
+	{
+		case PressEnter:
+			valueName = L"PressEnter";
+			break;
+		case DisableNewLine:
+			valueName = L"DisableNewLine";
+			break;
+	}
 
 	HKEY hKey;
     DWORD dwDisposition;
@@ -96,6 +114,15 @@ std::wstring GetClipboardText() {
     std::wstring text(pwszText);
     GlobalUnlock(hData);
     CloseClipboard();
+    if (disableNewLine) {
+        if (!text.empty() && text.back() == L'\n') {
+            text.pop_back();
+            if (!text.empty() && text.back() == L'\r') {
+                text.pop_back();
+            }
+        }
+    }
+
     return text;
 }
 
@@ -178,7 +205,12 @@ void ShowContextMenu(HWND hwnd) {
         UINT uCheck2 = (!pressEnter) ? MF_CHECKED : MF_UNCHECKED;
         InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING | uCheck2, ID_TRAY_OPTION2, L"CTRL-V");
 
+		// Disable New Line at the end
+    	InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+        UINT uCheck3 = (disableNewLine) ? MF_CHECKED : MF_UNCHECKED;
+        InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING | uCheck3, ID_TRAY_OPTION3, L"Disable new line at the end");
         InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+
         InsertMenu(hMenu, -1, MF_BYPOSITION, ID_TRAY_EXIT, L"Exit");
 
 		// Display context menu
@@ -188,7 +220,7 @@ void ShowContextMenu(HWND hwnd) {
     }
 }
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_HOTKEY:
         if (wParam == 1) {
@@ -198,18 +230,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP) {
-            ShowContextMenu(hwnd);
+            ShowContextMenu(hWnd);
         }
         break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
 	        case ID_TRAY_OPTION1:
                 pressEnter = true;
-                WriteRegistry(true);
+                WriteRegistry(PressEnter, true);
 	            break;
 	        case ID_TRAY_OPTION2:
                 pressEnter = false;
-                WriteRegistry(false);
+                WriteRegistry(PressEnter, false);
+	            break;
+			case ID_TRAY_OPTION3:
+                disableNewLine = !disableNewLine;
+                WriteRegistry(DisableNewLine, disableNewLine);
 	            break;
 	        case ID_TRAY_EXIT:
 	            PostQuitMessage(0);
@@ -223,7 +259,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         PostQuitMessage(0);
         break;
     default:
-        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+        return DefWindowProc(hWnd, uMsg, wParam, lParam);
     }
     return 0;
 }
@@ -240,6 +276,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     RegisterClass(&wc);
 
     pressEnter = ReadRegistry(L"SOFTWARE\\valnoxy\\TypeIt", L"PressEnter");
+    disableNewLine = ReadRegistry(L"SOFTWARE\\valnoxy\\TypeIt", L"DisableNewLine");
 
     hWnd = CreateWindowEx(
         0,
