@@ -3,9 +3,12 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <chrono>
+
 #include "resource.h"
 
 #define WM_TRAYICON (WM_USER + 1)
+#define WM_CLOSE_POPUP (WM_USER + 1)
 #define APP_VERSION L"1.1.1.62"
 
 enum
@@ -13,15 +16,15 @@ enum
 	ID_TRAY_EXIT = 1001,
 	ID_TRAY_OPTION1 = 1002, // CTRL-V + ENTER
 	ID_TRAY_OPTION2 = 1003, // CTRL-V
-	ID_TRAY_OPTION3 = 1004 // Disable new line at the end
+	ID_TRAY_OPTION3 = 1004  // Disable new line at the end
 };
-
 
 HINSTANCE h_inst;
 NOTIFYICONDATA nid;
 HWND h_wnd;
 bool press_enter = true;
 bool disable_new_line = false;
+std::wstring lastClipboardText;
 
 enum options
 {
@@ -29,6 +32,99 @@ enum options
     DisableNewLine
 };
 
+constexpr wchar_t POPUP_TEXT[] = L"There are more than 50 characters in your clipboard.\nPress CTRL-B again to continue.";
+HWND hwndPopupLocal = nullptr;
+
+LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CLOSE_POPUP:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        hwndPopupLocal = nullptr;
+        break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+void ClosePopupAfterDelay(HWND hwnd) {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    if (hwnd) {
+        PostMessage(hwnd, WM_CLOSE_POPUP, 0, 0);
+    }
+}
+
+HWND CreatePopupWindow(HINSTANCE hInstance) {
+    WNDCLASS wc = {};
+    wc.lpfnWndProc = PopupWindowProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"PopupWindowClass";
+    wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
+
+    if (!RegisterClass(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return nullptr;
+    }
+
+    int windowWidth = 400;
+    int windowHeight = 60;
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    int xPos = (screenWidth - windowWidth) / 2;
+    int yPos = screenHeight - windowHeight - 50;
+
+    hwndPopupLocal = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"PopupWindowClass",
+        NULL,
+        WS_POPUP,
+        xPos, yPos, windowWidth, windowHeight,
+        NULL, NULL, hInstance, NULL
+    );
+
+    if (hwndPopupLocal) {
+        SetLayeredWindowAttributes(hwndPopupLocal, 0, (BYTE)(255 * 0.75), LWA_ALPHA);
+        ShowWindow(hwndPopupLocal, SW_SHOW);
+
+        HDC hdc = GetDC(hwndPopupLocal);
+
+        HFONT hFont = CreateFont(
+            20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
+        );
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(255, 255, 255));
+
+        RECT rect;
+        GetClientRect(hwndPopupLocal, &rect);
+
+        DrawText(hdc, POPUP_TEXT, -1, &rect, DT_CALCRECT | DT_WORDBREAK);
+        int textHeight = rect.bottom - rect.top;
+
+        // Center horizontal
+        rect.top = (windowHeight - textHeight) / 2;
+        rect.bottom = rect.top + textHeight;
+
+        // Calculate width of text
+        int textWidth = rect.right - rect.left;
+        rect.left = (windowWidth - textWidth) / 2;
+        rect.right = rect.left + textWidth;
+
+        // Draw the text
+        DrawText(hdc, POPUP_TEXT, -1, &rect, DT_WORDBREAK);
+
+        SelectObject(hdc, hOldFont);
+        DeleteObject(hFont);
+        ReleaseDC(hwndPopupLocal, hdc);
+
+        // Thread to send a message to close the window after 5 seconds
+        std::thread(ClosePopupAfterDelay, hwndPopupLocal).detach();
+    }
+
+    return hwndPopupLocal;
+}
 // Read stored registry value
 bool ReadRegistry(const wchar_t* keyPath, const wchar_t* valueName) {
     HKEY hKey;
@@ -100,7 +196,7 @@ bool WriteRegistry(options option, bool value) {
     return true;
 }
 
-std::wstring GetClipboardText() {
+std::wstring GetClipboardText(bool disable_new_line = true) {
     if (!OpenClipboard(nullptr)) {
         return L"";
     }
@@ -120,6 +216,7 @@ std::wstring GetClipboardText() {
     std::wstring text(pwszText);
     GlobalUnlock(hData);
     CloseClipboard();
+
     if (disable_new_line) {
         if (!text.empty() && text.back() == L'\n') {
             text.pop_back();
@@ -129,6 +226,13 @@ std::wstring GetClipboardText() {
         }
     }
 
+    if (text.length() > 50 && text != lastClipboardText) {
+        CreatePopupWindow(GetModuleHandle(nullptr));
+        lastClipboardText = text;
+        return L""; // Abort current operation
+    }
+
+    lastClipboardText = text;
     return text;
 }
 
@@ -291,6 +395,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             WriteRegistry(DisableNewLine, disable_new_line);
             break;
         case ID_TRAY_EXIT:
+            Shell_NotifyIcon(NIM_DELETE, &nid);
             PostQuitMessage(0);
             break;
         default:
@@ -307,11 +412,11 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
+
 // Entry Point
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
     h_inst = hInstance;
-    WNDCLASS wc;
-    wc = {0};
+    WNDCLASS wc = { 0 };
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
     wc.lpfnWndProc = WindowProc;
@@ -351,17 +456,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     }
     CreateTrayIcon(h_wnd);
 
-    MSG msg = { nullptr };
-    while (true) {
-        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_KEYDOWN && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && msg.wParam == 'B') {
-                std::wstring clipboardText = GetClipboardText();
-                SimulateKeyboardInput(clipboardText);
-            }
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
+
     return 0;
 }
+
