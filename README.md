@@ -30,7 +30,7 @@
     <a href="https://github.com/valnoxy/typeit/discussions/">Discussions</a>
     <br />
     <br />
-    🎉 Version 1.0.1 is out. Check out the release notes
+    🎉 Version 1.1.1 is out. Check out the release notes
     <a href="https://github.com/valnoxy/typeit/releases">here</a>.
     <br />
     <br />
