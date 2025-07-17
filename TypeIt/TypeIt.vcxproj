@@ -138,6 +138,7 @@
     <ClCompile Include="TypeIt.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <Image Include="bucker v3.ico" />
     <Image Include="icon1.ico" />
   </ItemGroup>
   <ItemGroup>

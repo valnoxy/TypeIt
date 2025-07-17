@@ -23,6 +23,9 @@
     <Image Include="icon1.ico">
       <Filter>Ressourcendateien</Filter>
     </Image>
+    <Image Include="bucker v3.ico">
+      <Filter>Ressourcendateien</Filter>
+    </Image>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">

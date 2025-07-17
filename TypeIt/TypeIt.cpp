@@ -4,76 +4,147 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <atomic>
 
 #include "resource.h"
 
 #define WM_TRAYICON (WM_USER + 1)
 #define WM_CLOSE_POPUP (WM_USER + 1)
-#define APP_VERSION L"1.1.1.62"
+#define APP_VERSION L"1.1.2.69"
 
 enum
 {
-	ID_TRAY_EXIT = 1001,
-	ID_TRAY_OPTION1 = 1002, // CTRL-V + ENTER
-	ID_TRAY_OPTION2 = 1003, // CTRL-V
-	ID_TRAY_OPTION3 = 1004  // Disable new line at the end
+    ID_TRAY_EXIT = 1001,
+    ID_TRAY_OPTION1 = 1002, // CTRL-V + ENTER
+    ID_TRAY_OPTION2 = 1003, // CTRL-V
+    ID_TRAY_OPTION3 = 1004, // Disable new line at the end
+    ID_TRAY_OPTION4 = 1005, // Use RegisterHotkey
+    ID_TRAY_OPTION5 = 1006, // Use RawInput
+    HOTKEY_ID_STOP = 2,     // Hotkey ID for ESC
 };
 
 HINSTANCE h_inst;
 NOTIFYICONDATA nid;
 HWND h_wnd;
-bool press_enter = true;
-bool disable_new_line = false;
 std::wstring lastClipboardText;
+volatile bool press_enter = true;
+volatile bool disable_new_line = false;
+volatile bool useRawInput = false;
+volatile bool cancelTyping = false;
+
+std::atomic<HWND> hwndPopupGlobal = ATOMIC_VAR_INIT(nullptr);
+std::thread popupCloseThread;
 
 enum options
 {
     PressEnter,
-    DisableNewLine
+    DisableNewLine,
+    UseRawInput
 };
 
-constexpr wchar_t POPUP_TEXT[] = L"There are more than 50 characters in your clipboard.\nPress CTRL-B again to continue.";
-HWND hwndPopupLocal = nullptr;
-
-LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+static LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CLOSE_POPUP:
+        if (hwndPopupGlobal.load() == hwnd) {
+            hwndPopupGlobal.store(nullptr);
+        }
         DestroyWindow(hwnd);
         return 0;
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        const wchar_t* popupText = reinterpret_cast<const wchar_t*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+        if (!popupText) {
+            popupText = L"";
+        }
+
+        HFONT hFont = CreateFont(
+            20,
+            0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
+        );
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(255, 255, 255));
+
+        RECT clientRect;
+        GetClientRect(hwnd, &clientRect);
+
+        RECT textRect = clientRect; 
+
+        DrawText(hdc, popupText, -1, &textRect, DT_CALCRECT | DT_WORDBREAK);
+
+        int textHeight = textRect.bottom - textRect.top;
+        int clientHeight = clientRect.bottom - clientRect.top;
+
+        if (textHeight < clientHeight) {
+            textRect.top = clientRect.top + (clientHeight - textHeight) / 2;
+            textRect.bottom = textRect.top + textHeight;
+        }
+        else {
+            textRect.top = clientRect.top;
+            textRect.bottom = clientRect.bottom;
+        }
+        textRect.left = clientRect.left;
+        textRect.right = clientRect.right;
+
+        DrawText(hdc, popupText, -1, &textRect, DT_WORDBREAK | DT_CENTER);
+
+        SelectObject(hdc, hOldFont);
+        DeleteObject(hFont);
+        EndPaint(hwnd, &ps);
+    }
+    break;
     case WM_DESTROY:
-        hwndPopupLocal = nullptr;
+        if (hwndPopupGlobal.load() == hwnd) {
+            hwndPopupGlobal.store(nullptr);
+        }
         break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-void ClosePopupAfterDelay(HWND hwnd) {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    if (hwnd) {
+static void CloseExistingPopup() {
+    HWND existingPopup = hwndPopupGlobal.load();
+    if (existingPopup) {
+        PostMessage(existingPopup, WM_CLOSE_POPUP, 0, 0);
+    }
+}
+
+static void AutoClosePopupAfterDelay(HWND hwnd, int delaySeconds) {
+    std::this_thread::sleep_for(std::chrono::seconds(delaySeconds));
+    if (hwndPopupGlobal.load() == hwnd) { 
         PostMessage(hwnd, WM_CLOSE_POPUP, 0, 0);
     }
 }
 
-HWND CreatePopupWindow(HINSTANCE hInstance) {
+static HWND CreatePopup(HINSTANCE hInstance, const std::wstring& text, int autoCloseDelaySeconds = 0) {
+    CloseExistingPopup();
+
     WNDCLASS wc = {};
     wc.lpfnWndProc = PopupWindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = L"PopupWindowClass";
     wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
 
-    if (!RegisterClass(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        return nullptr;
+    if (!GetClassInfo(hInstance, L"PopupWindowClass", &wc)) {
+        if (!RegisterClass(&wc)) {
+            return nullptr;
+        }
     }
 
     int windowWidth = 400;
-    int windowHeight = 60;
+    int windowHeight = 50;
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
     int xPos = (screenWidth - windowWidth) / 2;
     int yPos = screenHeight - windowHeight - 50;
 
-    hwndPopupLocal = CreateWindowEx(
+    HWND newPopup = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         L"PopupWindowClass",
         NULL,
@@ -82,51 +153,37 @@ HWND CreatePopupWindow(HINSTANCE hInstance) {
         NULL, NULL, hInstance, NULL
     );
 
-    if (hwndPopupLocal) {
-        SetLayeredWindowAttributes(hwndPopupLocal, 0, (BYTE)(255 * 0.75), LWA_ALPHA);
-        ShowWindow(hwndPopupLocal, SW_SHOW);
+    if (newPopup) {
+        SetWindowLongPtr(newPopup, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(text.c_str()));
 
-        HDC hdc = GetDC(hwndPopupLocal);
+        SetLayeredWindowAttributes(newPopup, 0, (BYTE)(255 * 0.75), LWA_ALPHA);
+        ShowWindow(newPopup, SW_SHOWNA);
+        UpdateWindow(newPopup);
 
-        HFONT hFont = CreateFont(
-            20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
-        );
-        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(255, 255, 255));
+        hwndPopupGlobal.store(newPopup);
 
-        RECT rect;
-        GetClientRect(hwndPopupLocal, &rect);
-
-        DrawText(hdc, POPUP_TEXT, -1, &rect, DT_CALCRECT | DT_WORDBREAK);
-        int textHeight = rect.bottom - rect.top;
-
-        // Center horizontal
-        rect.top = (windowHeight - textHeight) / 2;
-        rect.bottom = rect.top + textHeight;
-
-        // Calculate width of text
-        int textWidth = rect.right - rect.left;
-        rect.left = (windowWidth - textWidth) / 2;
-        rect.right = rect.left + textWidth;
-
-        // Draw the text
-        DrawText(hdc, POPUP_TEXT, -1, &rect, DT_WORDBREAK);
-
-        SelectObject(hdc, hOldFont);
-        DeleteObject(hFont);
-        ReleaseDC(hwndPopupLocal, hdc);
-
-        // Thread to send a message to close the window after 5 seconds
-        std::thread(ClosePopupAfterDelay, hwndPopupLocal).detach();
+        if (autoCloseDelaySeconds > 0) {
+            if (popupCloseThread.joinable()) {
+                popupCloseThread.detach();
+            }
+            popupCloseThread = std::thread(AutoClosePopupAfterDelay, newPopup, autoCloseDelaySeconds);
+            popupCloseThread.detach();
+        }
     }
 
-    return hwndPopupLocal;
+    return newPopup;
 }
+
+static void RestartApplication(HWND hWnd) {
+    wchar_t szPath[MAX_PATH];
+    GetModuleFileNameW(NULL, szPath, MAX_PATH);
+    Shell_NotifyIcon(NIM_DELETE, &nid);
+    PostQuitMessage(0);
+    ShellExecuteW(NULL, L"open", szPath, NULL, NULL, SW_SHOWNORMAL);
+}
+
 // Read stored registry value
-bool ReadRegistry(const wchar_t* keyPath, const wchar_t* valueName) {
+static bool ReadRegistry(const wchar_t* keyPath, const wchar_t* valueName) {
     HKEY hKey;
     DWORD dwType = REG_DWORD;
     DWORD dwData = 0;
@@ -138,11 +195,11 @@ bool ReadRegistry(const wchar_t* keyPath, const wchar_t* valueName) {
         RegCloseKey(hKey);
     }
 
-    return (result == ERROR_SUCCESS && dwData != 0); // Return true if value exists and is non-zero
+    return (result == ERROR_SUCCESS && dwData != 0);
 }
 
 // Write stored registry value
-bool WriteRegistry(options option, bool value) {
+static bool WriteRegistry(options option, bool value) {
     const wchar_t* keyPath = L"SOFTWARE\\valnoxy\\TypeIt";
     LPCWSTR valueName = nullptr;
 
@@ -153,6 +210,9 @@ bool WriteRegistry(options option, bool value) {
         break;
     case DisableNewLine:
         valueName = L"DisableNewLine";
+        break;
+    case UseRawInput:
+        valueName = L"UseRawInput";
         break;
     }
 
@@ -172,7 +232,7 @@ bool WriteRegistry(options option, bool value) {
     );
 
     if (result != ERROR_SUCCESS) {
-        std::cerr << "Failed to create registry key." << '\n';
+        OutputDebugStringW(L"Failed to create registry key.\n");
         return false;
     }
 
@@ -189,14 +249,14 @@ bool WriteRegistry(options option, bool value) {
     RegCloseKey(hKey);
 
     if (result != ERROR_SUCCESS) {
-        std::cerr << "Failed to set registry value." << '\n';
+        OutputDebugStringW(L"Failed to set registry value.\n");
         return false;
     }
 
     return true;
 }
 
-std::wstring GetClipboardText(bool disable_new_line = true) {
+static std::wstring GetClipboardText(bool disable_new_line_param = true) {
     if (!OpenClipboard(nullptr)) {
         return L"";
     }
@@ -217,7 +277,7 @@ std::wstring GetClipboardText(bool disable_new_line = true) {
     GlobalUnlock(hData);
     CloseClipboard();
 
-    if (disable_new_line) {
+    if (disable_new_line_param) { // Use the parameter here
         if (!text.empty() && text.back() == L'\n') {
             text.pop_back();
             if (!text.empty() && text.back() == L'\r') {
@@ -227,7 +287,7 @@ std::wstring GetClipboardText(bool disable_new_line = true) {
     }
 
     if (text.length() > 50 && text != lastClipboardText) {
-        CreatePopupWindow(GetModuleHandle(nullptr));
+        CreatePopup(h_inst, L"There are more than 50 characters in your clipboard.\nPress CTRL-B again to continue.", 5);
         lastClipboardText = text;
         return L""; // Abort current operation
     }
@@ -236,7 +296,8 @@ std::wstring GetClipboardText(bool disable_new_line = true) {
     return text;
 }
 
-bool IsNoKeyCurrentlyPressed() {
+static bool IsNoKeyCurrentlyPressed()
+{
     // Check relevant keys: Ctrl, Shift, Alt
     if (GetAsyncKeyState(VK_CONTROL) & 0x8000) return false;
     if (GetAsyncKeyState(VK_SHIFT) & 0x8000) return false;
@@ -245,14 +306,27 @@ bool IsNoKeyCurrentlyPressed() {
     return true;
 }
 
-// Simulate Keyboard Input
-void SimulateKeyboardInput(const std::wstring& text) {
-    // Wait until no relevant key is pressed
+static void SimulateKeyboardInput(const std::wstring& text) {
+    cancelTyping = false;
+
+    CreatePopup(h_inst, L"Typing content...\nPress ESC to abort.", 0);
+
     while (!IsNoKeyCurrentlyPressed()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (cancelTyping) {
+            OutputDebugStringW(L"Typing cancelled during initial key check.\n");
+            CloseExistingPopup();
+            return;
+        }
     }
 
     for (wchar_t c : text) {
+        if (cancelTyping) {
+            OutputDebugStringW(L"Typing cancelled by user during character input.\n");
+            CloseExistingPopup();
+            return;
+        }
+
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
 
@@ -272,13 +346,26 @@ void SimulateKeyboardInput(const std::wstring& text) {
             SendInput(1, &input, sizeof(INPUT));
         }
 
-        // Workaround for preventing typing too fast
+        // Ugly fix for preventing typing too fast
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    // Press Enter if option is enabled
+    if (cancelTyping) {
+        OutputDebugStringW(L"Typing cancelled before final enter.\n");
+        CloseExistingPopup();
+        return;
+    }
+
     if (press_enter) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        for (int i = 0; i < 50; ++i) { // 500ms total, 10ms per check
+            if (cancelTyping) {
+                OutputDebugStringW(L"Typing cancelled during final enter delay.\n");
+                CloseExistingPopup();
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
         input.ki.wVk = VK_RETURN;
@@ -287,10 +374,12 @@ void SimulateKeyboardInput(const std::wstring& text) {
         input.ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(1, &input, sizeof(INPUT));
     }
+    OutputDebugStringW(L"Typing finished normally.\n");
+    CloseExistingPopup();
 }
 
 // Tray Icon
-void CreateTrayIcon(HWND hwnd) {
+static void CreateTrayIcon(HWND hwnd) {
     nid.cbSize = sizeof(NOTIFYICONDATA);
     nid.hWnd = hwnd;
     nid.uID = 1;
@@ -302,7 +391,7 @@ void CreateTrayIcon(HWND hwnd) {
     Shell_NotifyIcon(NIM_ADD, &nid);
 }
 
-void ShowContextMenu(HWND hwnd) {
+static void ShowContextMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
@@ -324,6 +413,15 @@ void ShowContextMenu(HWND hwnd) {
         InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
         UINT uCheck3 = (disable_new_line) ? MF_CHECKED : MF_UNCHECKED;
         InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING | uCheck3, ID_TRAY_OPTION3, L"Disable new line at the end");
+
+        // Input options
+        InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+        UINT uCheck4 = (!useRawInput) ? MF_CHECKED : MF_UNCHECKED;
+        InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING | uCheck4, ID_TRAY_OPTION4, L"Use RegisterHotkey");
+
+        UINT uCheck5 = (useRawInput) ? MF_CHECKED : MF_UNCHECKED;
+        InsertMenu(hMenu, -1, MF_BYPOSITION | MF_STRING | uCheck5, ID_TRAY_OPTION5, L"Use RawInput");
+
         InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
 
         InsertMenu(hMenu, -1, MF_BYPOSITION, ID_TRAY_EXIT, L"Exit");
@@ -335,7 +433,7 @@ void ShowContextMenu(HWND hwnd) {
     }
 }
 
-void ProcessRawInput(LPARAM lParam) {
+static void ProcessRawInput(LPARAM lParam) {
     UINT dwSize = 0;
     GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &dwSize, sizeof(RAWINPUTHEADER));
 
@@ -355,8 +453,19 @@ void ProcessRawInput(LPARAM lParam) {
             bool ctrlPressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool bKeyPressed = (virtualKey == 'B') && !(flags & RI_KEY_BREAK); // RI_KEY_BREAK: key up
 
+            bool escKeyPressed = (virtualKey == VK_ESCAPE) && !(flags & RI_KEY_BREAK);
+
             if (ctrlPressed && bKeyPressed) {
-                SimulateKeyboardInput(GetClipboardText());
+                std::wstring clipboardText = GetClipboardText();
+                if (!clipboardText.empty()) {
+                    std::thread typingThread(SimulateKeyboardInput, clipboardText);
+                    typingThread.detach();
+                    OutputDebugStringW(L"(RAW) CTRL-B: Typing thread started.\n");
+                }
+            }
+            else if (escKeyPressed) {
+                cancelTyping = true; // Set the flag to cancel
+                OutputDebugStringW(L"(RAW) ESC hotkey pressed, setting cancelTyping to true.\n");
             }
         }
     }
@@ -364,7 +473,7 @@ void ProcessRawInput(LPARAM lParam) {
     delete[] lpb;
 }
 
-LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_INPUT:
         ProcessRawInput(lParam);
@@ -372,7 +481,15 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_HOTKEY:
         if (wParam == 1) {
             std::wstring clipboardText = GetClipboardText();
-            SimulateKeyboardInput(clipboardText);
+            if (!clipboardText.empty()) {
+                std::thread typingThread(SimulateKeyboardInput, clipboardText);
+                typingThread.detach();
+                OutputDebugStringW(L"CTRL-B hotkey: Typing thread started.\n");
+            }
+        }
+        else if (wParam == HOTKEY_ID_STOP) {
+            cancelTyping = true; 
+            OutputDebugStringW(L"ESC hotkey pressed, setting cancelTyping to true.\n");
         }
         break;
     case WM_TRAYICON:
@@ -394,6 +511,18 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             disable_new_line = !disable_new_line;
             WriteRegistry(DisableNewLine, disable_new_line);
             break;
+        case ID_TRAY_OPTION4:
+            useRawInput = false;
+            WriteRegistry(UseRawInput, false);
+            MessageBox(nullptr, L"Changed to Hotkey Mode. TypeIt will now restart to apply changes.", L"TypeIt Information", MB_OK | MB_ICONINFORMATION);
+            RestartApplication(hWnd);
+            break;
+        case ID_TRAY_OPTION5:
+            useRawInput = true;
+            WriteRegistry(UseRawInput, true);
+            MessageBox(nullptr, L"Changed to Raw Input Mode. TypeIt will now restart to apply changes.", L"TypeIt Information", MB_OK | MB_ICONINFORMATION);
+            RestartApplication(hWnd);
+            break;
         case ID_TRAY_EXIT:
             Shell_NotifyIcon(NIM_DELETE, &nid);
             PostQuitMessage(0);
@@ -412,10 +541,10 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-
 // Entry Point
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
-    h_inst = hInstance;
+    OutputDebugStringW(L"Starting TypeIt\n");
+	h_inst = hInstance;
     WNDCLASS wc = { 0 };
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
@@ -427,6 +556,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 
     press_enter = ReadRegistry(L"SOFTWARE\\valnoxy\\TypeIt", L"PressEnter");
     disable_new_line = ReadRegistry(L"SOFTWARE\\valnoxy\\TypeIt", L"DisableNewLine");
+    useRawInput = ReadRegistry(L"SOFTWARE\\valnoxy\\TypeIt", L"UseRawInput");
 
     h_wnd = CreateWindowEx(
         0,
@@ -444,16 +574,33 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         return 0;
     }
 
-    RAWINPUTDEVICE rid;
-    rid.usUsagePage = 0x01;         // Desktop control
-    rid.usUsage = 0x06;             // Keyboard
-    rid.dwFlags = RIDEV_INPUTSINK;  // Background
-    rid.hwndTarget = h_wnd;
+    // Register Hotkey methods
+    if (useRawInput)
+    {
+        RAWINPUTDEVICE rid[2]; // Array for multiple devices
 
-    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) {
-        MessageBox(nullptr, L"Failed to register raw input device", L"Error", MB_OK | MB_ICONERROR);
-        return 0;
+        // Keyboard for Ctrl+B detection
+        rid[0].usUsagePage = 0x01;          // Desktop control
+        rid[0].usUsage = 0x06;              // Keyboard
+        rid[0].dwFlags = RIDEV_INPUTSINK;   // Background
+        rid[0].hwndTarget = h_wnd;
+
+        if (!RegisterRawInputDevices(&rid[0], 1, sizeof(rid[0]))) { // Register only the first device
+            MessageBox(nullptr, L"Failed to register raw input device!", L"TypeIt Error", MB_OK | MB_ICONERROR);
+            return 1;
+        }
     }
+    else
+    {
+        if (!RegisterHotKey(h_wnd, 1, MOD_CONTROL, 'B')) {
+            MessageBox(nullptr, L"Failed to register hotkey! Make sure that no other application is already using the CTRL-B hotkey.", L"TypeIt Error", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+        if (!RegisterHotKey(h_wnd, HOTKEY_ID_STOP, 0, VK_ESCAPE)) {
+           MessageBox(nullptr, L"Failed to register ESC hotkey.", L"TypeIt Warning", MB_OK | MB_ICONWARNING);
+        }
+    }
+
     CreateTrayIcon(h_wnd);
 
     MSG msg;
@@ -462,6 +609,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         DispatchMessage(&msg);
     }
 
+    if (!useRawInput)
+    {
+        UnregisterHotKey(h_wnd, 1);
+        UnregisterHotKey(h_wnd, HOTKEY_ID_STOP);
+    }
     return 0;
 }
-
