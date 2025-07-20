@@ -30,7 +30,7 @@
     <a href="https://github.com/valnoxy/typeit/discussions/">Discussions</a>
     <br />
     <br />
-    🎉 Version 1.1.1 is out. Check out the release notes
+    🎉 Version 1.1.2 is out. Check out the release notes
     <a href="https://github.com/valnoxy/typeit/releases">here</a>.
     <br />
     <br />
@@ -51,6 +51,6 @@ The clipboard is typed in with the hotkey ```CTRL-B```.
 TIelevated is licensed under [GPL-3.0](https://github.com/valnoxy/TIelevated/blob/main/LICENSE).
 
 <hr>
-<h6 align="center">© 2018 - 2024 valnoxy. All Rights Reserved. 
+<h6 align="center">© 2018 - 2025 valnoxy. All Rights Reserved. 
 <br>
 By Jonas Günner &lt;jonas@exploitox.de&gt;</h6>
