@@ -514,13 +514,13 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         case ID_TRAY_OPTION4:
             useRawInput = false;
             WriteRegistry(UseRawInput, false);
-            MessageBox(nullptr, L"Changed to Hotkey Mode. TypeIt will now restart to apply changes.", L"TypeIt Information", MB_OK | MB_ICONINFORMATION);
+            MessageBox(nullptr, L"Changed to Hotkey Mode. TypeIt will now restart to apply changes.", L"TypeIt", MB_OK | MB_ICONINFORMATION);
             RestartApplication(hWnd);
             break;
         case ID_TRAY_OPTION5:
             useRawInput = true;
             WriteRegistry(UseRawInput, true);
-            MessageBox(nullptr, L"Changed to Raw Input Mode. TypeIt will now restart to apply changes.", L"TypeIt Information", MB_OK | MB_ICONINFORMATION);
+            MessageBox(nullptr, L"Changed to Raw Input Mode. TypeIt will now restart to apply changes.", L"TypeIt", MB_OK | MB_ICONINFORMATION);
             RestartApplication(hWnd);
             break;
         case ID_TRAY_EXIT:
@@ -586,18 +586,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         rid[0].hwndTarget = h_wnd;
 
         if (!RegisterRawInputDevices(&rid[0], 1, sizeof(rid[0]))) { // Register only the first device
-            MessageBox(nullptr, L"Failed to register raw input device!", L"TypeIt Error", MB_OK | MB_ICONERROR);
+            MessageBox(nullptr, L"Failed to register raw input device!", L"TypeIt", MB_OK | MB_ICONERROR);
             return 1;
         }
     }
     else
     {
         if (!RegisterHotKey(h_wnd, 1, MOD_CONTROL, 'B')) {
-            MessageBox(nullptr, L"Failed to register hotkey! Make sure that no other application is already using the CTRL-B hotkey.", L"TypeIt Error", MB_OK | MB_ICONERROR);
+            MessageBox(nullptr, L"Failed to register hotkey! Make sure that no other application is already using the CTRL-B hotkey.", L"TypeIt", MB_OK | MB_ICONERROR);
             return 1;
         }
         if (!RegisterHotKey(h_wnd, HOTKEY_ID_STOP, 0, VK_ESCAPE)) {
-           MessageBox(nullptr, L"Failed to register ESC hotkey.", L"TypeIt Warning", MB_OK | MB_ICONWARNING);
+           MessageBox(nullptr, L"Failed to register ESC hotkey.", L"TypeIt", MB_OK | MB_ICONWARNING);
         }
     }
 
